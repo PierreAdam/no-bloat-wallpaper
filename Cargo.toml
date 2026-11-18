@@ -1,0 +1,31 @@
+[package]
+name = "no-bloat-wallpaper"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny, scheduler-driven wallpaper rotator. No tray icon, no resident process."
+license = "MIT"
+repository = "https://github.com/CHANGE-ME/no-bloat-wallpaper"
+
+[[bin]]
+name = "nbw"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+fastrand = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ureq = { version = "2", features = ["json"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
