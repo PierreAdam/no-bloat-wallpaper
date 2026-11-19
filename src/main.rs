@@ -1,12 +1,6 @@
-mod config;
-mod platform;
-mod sources;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
-use sources::{Candidate, Location};
-use std::path::PathBuf;
+use no_bloat_wallpaper::{config, engine, platform};
 
 #[derive(Parser)]
 #[command(version, about = "Tiny scheduler-driven wallpaper rotator")]
@@ -17,74 +11,73 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Fetch a new wallpaper and apply it (this is what the scheduler runs).
-    Run,
-    /// Register the periodic task with the OS scheduler, using `interval_hours`.
+    /// Fetch a new wallpaper and apply it now (like "Change now" in the app).
+    Run {
+        /// Behave like the after-login check: skip if there is nothing new (latest mode, a manual
+        /// pick is respected) or nothing overdue (random mode).
+        #[arg(long)]
+        if_due: bool,
+    },
+    /// Register the periodic task (and the after-login check, if enabled) with the OS scheduler.
     Install,
-    /// Remove the periodic task.
+    /// Remove the scheduled tasks (periodic and after-login).
     Uninstall,
     /// Copy the current wallpaper (and its license info) into the favorites folder.
     Favorite,
     /// Print the config file path, creating a default one if needed.
     Config,
-    /// Query every enabled source and report how many images each offers (changes nothing).
+    /// Query every enabled source and report how many images each offers. The answers are saved
+    /// in the source cache; the wallpaper does not change.
     Check,
-}
-
-/// What we remember between runs.
-#[derive(Default, Serialize, Deserialize)]
-struct State {
-    seen: Vec<String>,
-    current: Option<Current>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Current {
-    id: String,
-    title: String,
-    credit: Option<String>,
-    license: String,
-    file: PathBuf,
-}
-
-fn state_path() -> Result<PathBuf> {
-    Ok(config::data_dir()?.join("state.json"))
-}
-
-fn load_state() -> State {
-    state_path()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-fn save_state(s: &State) -> Result<()> {
-    let p = state_path()?;
-    std::fs::create_dir_all(p.parent().unwrap())?;
-    std::fs::write(p, serde_json::to_string_pretty(s)?)?;
-    Ok(())
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Run => run(),
+        Cmd::Run { if_due } => {
+            let outcome = if if_due { engine::run_if_due()? } else { engine::refresh_now()? };
+            let cur = match outcome {
+                engine::Outcome::Changed(c) => c,
+                engine::Outcome::Skipped(why) => {
+                    println!("Nothing to do: {why}.");
+                    return Ok(());
+                }
+            };
+            println!("Set: {}", cur.title);
+            if let Some(c) = &cur.credit {
+                println!("Credit: {c}");
+            }
+            println!("License: {}", cur.license);
+            Ok(())
+        }
         Cmd::Install => {
+            let hours = engine::apply_schedule()?;
             let cfg = config::load()?;
-            platform::install_schedule(cfg.interval_hours)?;
-            println!("Scheduled every {}h.", cfg.interval_hours);
+            println!("Scheduled every {hours}h.");
+            if cfg.check_on_login {
+                println!("Also checking {}s after login.", cfg.login_delay_secs);
+            }
             Ok(())
         }
         Cmd::Uninstall => platform::remove_schedule(),
-        Cmd::Favorite => favorite(),
+        Cmd::Favorite => {
+            let fav = engine::favorite_current()?;
+            println!("Saved to {}", fav.file.display());
+            println!("License: {}", fav.license);
+            println!("Reminder: you are responsible for checking the license before keeping or reusing an image.");
+            Ok(())
+        }
         Cmd::Check => {
-            let cfg = config::load()?;
-            for src in cfg.sources.iter().filter(|s| s.enabled) {
-                match sources::fetch(src) {
-                    Ok(c) => println!("[{}] ok: {} image(s), e.g. \"{}\"", src.id, c.len(), c.first().map(|x| x.title.as_str()).unwrap_or("-")),
-                    Err(e) => println!("[{}] FAILED: {e:#}", src.id),
+            for (id, res) in engine::check_sources()? {
+                match res {
+                    Ok(c) => println!(
+                        "[{id}] ok: {} image(s), e.g. \"{}\"",
+                        c.len(),
+                        c.first().map(|x| x.title.as_str()).unwrap_or("-")
+                    ),
+                    Err(e) => println!("[{id}] FAILED: {e:#}"),
                 }
             }
+            println!("The source cache was updated; the wallpaper did not change.");
             Ok(())
         }
         Cmd::Config => {
@@ -93,110 +86,4 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn run() -> Result<()> {
-    let cfg = config::load()?;
-    let mut state = load_state();
-
-    let mut all: Vec<Candidate> = Vec::new();
-    for src in cfg.sources.iter().filter(|s| s.enabled) {
-        match sources::fetch(src) {
-            Ok(c) => all.extend(c),
-            Err(e) => eprintln!("[{}] skipped: {e:#}", src.id),
-        }
-    }
-    all.retain(|c| !state.seen.contains(&c.id));
-    if all.is_empty() {
-        // Everything has been seen: start over rather than doing nothing.
-        state.seen.clear();
-        save_state(&state)?;
-        anyhow::bail!("no new images available this time; history reset, will retry next run");
-    }
-
-    // Try candidates until one downloads as a valid image; remember bad ones so they are skipped.
-    let (pick, file) = loop {
-        if all.is_empty() {
-            save_state(&state)?;
-            anyhow::bail!("no usable image found this time");
-        }
-        let pick = if cfg.rotation == "latest" {
-            all.remove(0)
-        } else {
-            all.swap_remove(fastrand::usize(..all.len()))
-        };
-        match materialize(&pick) {
-            Ok(file) => break (pick, file),
-            Err(e) => {
-                eprintln!("[{}] rejected: {e:#}", pick.id);
-                state.seen.push(pick.id);
-            }
-        }
-    };
-    platform::set_wallpaper(&file)?;
-
-    state.seen.push(pick.id.clone());
-    if state.seen.len() > 500 {
-        state.seen.drain(..100);
-    }
-    state.current = Some(Current {
-        id: pick.id,
-        title: pick.title.clone(),
-        credit: pick.credit.clone(),
-        license: pick.license.clone(),
-        file,
-    });
-    save_state(&state)?;
-
-    println!("Set: {}", pick.title);
-    if let Some(c) = &pick.credit {
-        println!("Credit: {c}");
-    }
-    println!("License: {}", pick.license);
-    Ok(())
-}
-
-/// Download (or reference) the chosen image and return a local file path.
-fn materialize(c: &Candidate) -> Result<PathBuf> {
-    match &c.location {
-        Location::File(p) => Ok(p.clone()),
-        Location::Url(url) => {
-            let dir = config::data_dir()?.join("images");
-            std::fs::create_dir_all(&dir)?;
-            let safe: String = c
-                .id
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' })
-                .collect();
-            let file = dir.join(format!("{safe}.jpg"));
-            let resp = ureq::get(url).set("User-Agent", "no-bloat-wallpaper").call()?;
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes)?;
-            let is_jpeg = bytes.starts_with(&[0xFF, 0xD8]);
-            let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G']);
-            if !(is_jpeg || is_png) {
-                anyhow::bail!("not a JPEG/PNG image");
-            }
-            if bytes.len() < 50_000 {
-                anyhow::bail!("image too small ({} bytes), likely a placeholder", bytes.len());
-            }
-            std::fs::write(&file, bytes)?;
-            Ok(file)
-        }
-    }
-}
-
-fn favorite() -> Result<()> {
-    let state = load_state();
-    let cur = state.current.context("no wallpaper has been set yet")?;
-    let dir = config::data_dir()?.join("favorites");
-    std::fs::create_dir_all(&dir)?;
-    let name = cur.file.file_name().context("bad file name")?;
-    std::fs::copy(&cur.file, dir.join(name))?;
-    let info = dir.join(format!("{}.json", cur.file.file_stem().unwrap().to_string_lossy()));
-    std::fs::write(info, serde_json::to_string_pretty(&cur)?)?;
-    println!("Saved to {}", dir.display());
-    println!("License: {}", cur.license);
-    println!("Reminder: you are responsible for checking the license before keeping or reusing an image.");
-    Ok(())
 }

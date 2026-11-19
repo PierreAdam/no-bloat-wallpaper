@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "No Bloat Wallpaper",
+  "version": "0.1.0",
+  "identifier": "io.github.no-bloat-wallpaper",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "publisher": "no-bloat-wallpaper contributors",
+    "shortDescription": "A tiny, scheduler-driven wallpaper rotator",
+    "licenseFile": "../../LICENSE",
+    "resources": {
+      "../../target/release/nbw.exe": "nbw.exe",
+      "../../README.md": "README.md",
+      "../../DISCLAIMER.md": "DISCLAIMER.md"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./installer-hooks.nsh",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

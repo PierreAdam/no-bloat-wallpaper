@@ -1,0 +1,10 @@
+# Build into the repository's shared target dir so nbw and nbw-gui land side by side
+# in target/release (`nbw install` registers the nbw-gui next to it with the scheduler).
+# Note: Cargo only reads this when run from inside gui/src-tauri; the build scripts
+# at the repository root pass --target-dir explicitly instead.
+[build]
+target-dir = "../../target"
+
+# Same static C runtime as the root config (see ../../.cargo/config.toml).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
