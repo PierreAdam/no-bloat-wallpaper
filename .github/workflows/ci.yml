@@ -46,6 +46,9 @@ jobs:
       # With and without the GUI-only previews, so both builds stay warning-free.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --all-targets --features thumbnails -- -D warnings
+      # tauri-build checks that bundle.resources exist even for clippy, and one of them is
+      # target/release/nbw.exe. build.ps1 reuses this build, so it costs nothing extra.
+      - run: cargo build --release
       - run: cargo clippy --manifest-path gui/src-tauri/Cargo.toml --target-dir target -- -D warnings
       - run: cargo test
       - run: cargo test --features thumbnails
