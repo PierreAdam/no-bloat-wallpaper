@@ -7,6 +7,7 @@
 
 use crate::config::{self, SourceConfig};
 use crate::http;
+use crate::platform;
 use crate::sources::{self, Candidate};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,10 @@ pub fn images_dir() -> Result<PathBuf> {
 #[derive(Serialize, Deserialize)]
 struct Entry {
     fetched_at: u64,
+    /// Local date of the fetch (days since 1970-01-01). An answer from an earlier day is not
+    /// reused, so daily pictures change at local midnight. Older cache files have 0: stale.
+    #[serde(default)]
+    day: i64,
     items: Vec<Candidate>,
 }
 
@@ -88,14 +93,14 @@ pub fn fetch(src: &SourceConfig, ttl_minutes: u32, force: bool) -> Result<Vec<Ca
 
     if !force {
         if let Some(e) = &cached {
-            if is_fresh(e.fetched_at, now_secs(), ttl_minutes) {
+            if e.day == platform::local_today() && is_fresh(e.fetched_at, now_secs(), ttl_minutes) {
                 return Ok(e.items.clone());
             }
         }
     }
     match sources::fetch(src) {
         Ok(items) => {
-            let entry = Entry { fetched_at: now_secs(), items: items.clone() };
+            let entry = Entry { fetched_at: now_secs(), day: platform::local_today(), items: items.clone() };
             if let Ok(text) = serde_json::to_string(&entry) {
                 let _ = config::write_atomic(&path, text.as_bytes());
             }

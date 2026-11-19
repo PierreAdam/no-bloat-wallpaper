@@ -210,6 +210,15 @@ pub fn local_now() -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
 
+/// Today's date on this computer's clock, in days since 1970-01-01.
+#[cfg(windows)]
+pub fn local_today() -> i64 {
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    let mut t = unsafe { std::mem::zeroed() };
+    unsafe { GetLocalTime(&mut t) };
+    days_from_civil(i64::from(t.wYear), i64::from(t.wMonth), i64::from(t.wDay))
+}
+
 /// A complete task definition. Both tasks run as you, without admin rights, and use the
 /// same settings: no overlapping runs, a 10 minute limit, catch up when a start was missed,
 /// and the battery choice from the settings.
@@ -342,6 +351,24 @@ pub fn civil_date(days: i64) -> (i64, i64, i64) {
     let y = yoe + era * 400 + i64::from(m <= 2);
     (y, m, d)
 }
+
+/// Days since 1970-01-01 of a (year, month, day): the inverse of `civil_date`.
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Today's date in days since 1970-01-01 (UTC here: no local time zone support without Windows).
+#[cfg(not(windows))]
+pub fn local_today() -> i64 {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    (secs / 86_400) as i64
+}
 #[cfg(not(windows))]
 pub fn set_login_autostart(_command: Option<&str>) -> Result<()> {
     anyhow::bail!("starting at login is not implemented on this OS yet")
@@ -400,6 +427,10 @@ mod tests {
         assert_eq!(civil_date(0), (1970, 1, 1));
         assert_eq!(civil_date(20_775), (2026, 11, 18));
         assert_eq!(civil_date(11_016), (2000, 2, 29));
+        for days in [-1, 0, 59, 60, 11_016, 20_775, 100_000] {
+            let (y, m, d) = civil_date(days);
+            assert_eq!(days_from_civil(y, m, d), days);
+        }
     }
 
     /// Registers, reads back and deletes a throwaway task with the real XML (a 36 h interval,

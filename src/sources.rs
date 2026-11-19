@@ -216,7 +216,7 @@ fn parse_apod(feed: &str) -> Vec<Candidate> {
 // ---- Wikimedia Commons Picture of the Day ----
 
 // Each day's picture is the file used by the page `Template:Potd/YYYY-MM-DD` (pages exist ahead
-// of time, so only dates up to today are asked for). Two API calls cover the last two weeks:
+// of time, so only dates up to today, on this computer's clock, are asked for). Two API calls cover the last two weeks:
 // one for the file names, one for their sizes, URLs, author and license.
 //
 // Pictures are always taken from Wikimedia's scaled copies (at one of its standard widths),
@@ -264,9 +264,10 @@ struct WmMeta {
     value: serde_json::Value,
 }
 
-/// The last `POTD_DAYS` dates, newest first, as "YYYY-MM-DD" (UTC, like the Commons schedule).
+/// The last `POTD_DAYS` dates, newest first, as "YYYY-MM-DD". Dates follow this computer's
+/// clock, so a new day's picture shows from local midnight (the pages exist ahead of time).
 fn recent_dates() -> Vec<String> {
-    let today = (crate::cache::now_secs() / 86_400) as i64;
+    let today = crate::platform::local_today();
     (0..POTD_DAYS)
         .map(|back| {
             let (y, m, d) = crate::platform::civil_date(today - back);
@@ -289,7 +290,9 @@ fn without_query(url: &str) -> String {
 fn wikimedia() -> Result<Vec<Candidate>> {
     let dates = recent_dates();
     let templates: Vec<String> = dates.iter().map(|d| format!("Template:Potd/{d}")).collect();
-    let pages = wm_query("prop=images", &templates)?;
+    // Without imlimit the API returns only 10 images across all pages (and the rest needs a
+    // follow-up request), which would silently drop some days, often today.
+    let pages = wm_query("prop=images&imlimit=max", &templates)?;
     // Date -> file, in date order (newest first).
     let files: Vec<(String, String)> = dates
         .iter()
@@ -595,6 +598,12 @@ mod tests {
     #[test]
     #[ignore]
     fn live_wikimedia_potd() {
+        // Every day must come back with its file (the API's default limit used to drop some).
+        let templates: Vec<String> = recent_dates().iter().map(|d| format!("Template:Potd/{d}")).collect();
+        let pages = wm_query("prop=images&imlimit=max", &templates).unwrap();
+        let with_file = pages.iter().filter(|p| !p.images.is_empty()).count();
+        assert_eq!(with_file, POTD_DAYS as usize, "days without a file");
+
         let list = wikimedia().unwrap();
         assert!(list.len() >= 10, "only {} pictures", list.len());
         let first = &list[0];
